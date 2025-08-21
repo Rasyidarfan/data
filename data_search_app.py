@@ -14,7 +14,7 @@ st.set_page_config(
 
 class RumahTanggaSearchApp:
     def __init__(self):
-        self.data_dir = r"D:\Program\data"
+        self.data_dir = r""
         self.json_file = os.path.join(self.data_dir, "data.json")
     
     @st.cache_data
