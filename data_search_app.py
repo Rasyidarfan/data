@@ -106,6 +106,18 @@ class RumahTanggaSearchApp:
         
         return kk_list
     
+    def get_unique_kk_names_by_wilayah(self, json_data: List[Dict], wilayah: str) -> List[str]:
+        """Mengambil daftar KK unik dari JSON untuk wilayah tertentu"""
+        kk_list = []
+        seen = set()
+        for item in json_data:
+            if wilayah is None or wilayah == 'Semua' or item.get('wilayah', '').strip() == wilayah:
+                kk = item.get('KK', '').strip()
+                if kk and kk not in seen:
+                    kk_list.append(kk)
+                    seen.add(kk)
+        return kk_list
+
     def search_rumah_tangga(self, csv_data: pd.DataFrame, json_data: List[Dict], 
                            wilayah_filter: str = None, kk_filter: str = None) -> Tuple[pd.DataFrame, Dict]:
         """Mencari rumah tangga yang memiliki anggota dengan nama dari JSON"""
@@ -190,58 +202,8 @@ class RumahTanggaSearchApp:
             if 'result_desa_filter' not in st.session_state:
                 st.session_state.result_desa_filter = 'Semua'
             
-            # Filter untuk hasil - dengan session state
-            # col1, col2 = st.columns(2)
-            # with col1:
-            #     kec_options = ['Semua'] + sorted(results['nama_kec'].unique().tolist())
-            #     selected_kec = st.selectbox(
-            #         "Filter Kecamatan:",
-            #         options=kec_options,
-            #         index=kec_options.index(st.session_state.result_kec_filter) if st.session_state.result_kec_filter in kec_options else 0,
-            #         key="result_kec_selectbox"
-            #     )
-            #     st.session_state.result_kec_filter = selected_kec
-                
-            # with col2:
-            #     # Update desa options based on kec filter
-            #     if selected_kec == 'Semua':
-            #         desa_options = ['Semua'] + sorted(results['nama_desa'].unique().tolist())
-            #     else:
-            #         filtered_by_kec = results[results['nama_kec'] == selected_kec]
-            #         desa_options = ['Semua'] + sorted(filtered_by_kec['nama_desa'].unique().tolist())
-                
-            #     selected_desa = st.selectbox(
-            #         "Filter Desa:",
-            #         options=desa_options,
-            #         index=desa_options.index(st.session_state.result_desa_filter) if st.session_state.result_desa_filter in desa_options else 0,
-            #         key="result_desa_selectbox"
-            #     )
-            #     st.session_state.result_desa_filter = selected_desa
-            
             # Apply filters
             filtered_results = results.copy()
-            # if selected_kec != 'Semua':
-            #     filtered_results = filtered_results[filtered_results['nama_kec'] == selected_kec]
-            # if selected_desa != 'Semua':
-            #     filtered_results = filtered_results[filtered_results['nama_desa'] == selected_desa]
-            
-            # # Reset button for result filters
-            # col1, col2, col3 = st.columns([1, 1, 2])
-            # with col1:
-            #     if st.button("🔄 Reset Filter Hasil", key="reset_result_filters"):
-            #         st.session_state.result_kec_filter = 'Semua'
-            #         st.session_state.result_desa_filter = 'Semua'
-            #         st.rerun()
-            
-            # # Show filter info
-            # with col3:
-            #     if selected_kec != 'Semua' or selected_desa != 'Semua':
-            #         filter_info = []
-            #         if selected_kec != 'Semua':
-            #             filter_info.append(f"Kec: {selected_kec}")
-            #         if selected_desa != 'Semua':
-            #             filter_info.append(f"Desa: {selected_desa}")
-            #         st.info(f"Filter aktif: {', '.join(filter_info)}")
             
             # Tampilkan data per rumah tangga
             if filtered_results.empty:
@@ -266,7 +228,8 @@ class RumahTanggaSearchApp:
                         nama = str(member.get('b2r203', 'N/A'))
                         hubungan = str(member.get('hubungan', 'N/A'))
                         jk = str(member.get('jk', 'N/A'))
-                        umur = str(member.get('umur', 'N/A')) if pd.notna(member.get('umur')) else 'N/A'
+                        umur = str(member.get('umur', '')) if pd.notna(member.get('umur')) else ''
+                        b3r303 = str(member.get('b3r303', 'N/A')) if pd.notna(member.get('b3r303')) else 'N/A'
                         ijazah = str(member.get('ijazah', 'N/A')) if pd.notna(member.get('ijazah')) else 'N/A'
                         pendidikan = str(member.get('Pendidikan', 'N/A'))
                         
@@ -280,6 +243,7 @@ class RumahTanggaSearchApp:
                             'Hubungan': hubungan,
                             'Jenis Kelamin': jk,
                             'Umur': umur,
+                            'NIK': b3r303,
                             'Ijazah': ijazah,
                             'Pendidikan': pendidikan
                         })
@@ -328,7 +292,7 @@ def main():
     
     # Sidebar untuk filter
     col1, col2, col3 = st.columns(3, vertical_alignment="bottom")
-    
+
     # Filter berdasarkan wilayah (dropdown) - dengan session state
     with col1:
         unique_wilayah = app.get_unique_wilayah(json_data)
@@ -340,12 +304,17 @@ def main():
             key="wilayah_selectbox"
         )
         st.session_state.wilayah_filter = wilayah_filter
-    
-    # Filter berdasarkan KK (dropdown) - dengan session state
+
+    # Filter berdasarkan KK (dropdown) - bertingkat berdasarkan wilayah
     with col2:
-        # Ambil daftar KK unik dari JSON
-        unique_kk_names = app.get_unique_kk_names(json_data)
-        kk_options = ['Semua'] + unique_kk_names
+        # Ambil daftar KK unik dari JSON sesuai wilayah terpilih
+        filtered_kk_names = app.get_unique_kk_names_by_wilayah(
+            json_data, st.session_state.wilayah_filter
+        )
+        kk_options = ['Semua'] + filtered_kk_names
+        # Reset kk_filter jika tidak ada di opsi baru
+        if st.session_state.kk_filter not in kk_options:
+            st.session_state.kk_filter = 'Semua'
         kk_filter = st.selectbox(
             "Filter KK (Nama Kepala Keluarga):",
             options=kk_options,
@@ -353,7 +322,6 @@ def main():
             key="kk_selectbox"
         )
         st.session_state.kk_filter = kk_filter
-        
 
     with col3:
         if st.button("🔍 Cari Data Rumah Tangga", type="primary"):
