@@ -15,14 +15,14 @@ st.set_page_config(
 class RumahTanggaSearchApp:
     def __init__(self):
         self.data_dir = r""
-        self.json_file = os.path.join(self.data_dir, "data.json")
     
-    @st.cache_data
-    def load_json_data(_self) -> List[Dict]:
-        """Memuat data dari file JSON"""
+    def load_json_from_upload(self, uploaded_file) -> List[Dict]:
+        """Memuat data dari uploaded JSON file"""
         try:
-            with open(_self.json_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            if uploaded_file is not None:
+                data = json.load(uploaded_file)
+                return data
+            return []
         except Exception as e:
             st.error(f"Error membaca file JSON: {str(e)}")
             return []
@@ -92,6 +92,17 @@ class RumahTanggaSearchApp:
             if wilayah:
                 wilayah_set.add(wilayah)
         return sorted(list(wilayah_set))
+
+    def get_unique_wilayah_from_csv(self, csv_data: pd.DataFrame) -> List[str]:
+        """Mengambil daftar wilayah unik dari CSV dengan format 'nama_kec / nama_desa' (sorted)"""
+        wilayah_set = set()
+        for _, row in csv_data.iterrows():
+            kec = str(row.get('nama_kec', '')).strip()
+            desa = str(row.get('nama_desa', '')).strip()
+            if kec and desa:
+                wilayah = f"{kec} / {desa}"
+                wilayah_set.add(wilayah)
+        return sorted(list(wilayah_set))
     
     def get_unique_kk_names(self, json_data: List[Dict]) -> List[str]:
         """Mengambil daftar KK unik dari JSON sesuai urutan asli (tidak diurutkan, tidak di-parse)"""
@@ -118,54 +129,105 @@ class RumahTanggaSearchApp:
                     seen.add(kk)
         return kk_list
 
-    def search_rumah_tangga(self, csv_data: pd.DataFrame, json_data: List[Dict], 
+    def get_unique_kk_from_csv_by_wilayah(self, csv_data: pd.DataFrame, wilayah: str) -> List[str]:
+        """Mengambil daftar nama KK unik dari CSV untuk wilayah tertentu (hubungan == 1)"""
+        filtered_csv = csv_data[csv_data['hubungan'] == 1].copy()
+
+        if wilayah and wilayah != 'Semua':
+            # Parse wilayah filter (format: "nama_kec / nama_desa")
+            parts = wilayah.split(' / ')
+            if len(parts) == 2:
+                kec_filter = parts[0].strip()
+                desa_filter = parts[1].strip()
+                filtered_csv = filtered_csv[
+                    (filtered_csv['nama_kec'].astype(str).str.strip() == kec_filter) &
+                    (filtered_csv['nama_desa'].astype(str).str.strip() == desa_filter)
+                ]
+
+        # Ambil nama KK unik dari kolom b2r203
+        kk_names = filtered_csv['b2r203'].astype(str).str.strip().unique().tolist()
+        # Hapus nilai kosong atau 'nan'
+        kk_names = [name for name in kk_names if name and name.lower() != 'nan']
+        return sorted(kk_names)
+
+    def search_rumah_tangga(self, csv_data: pd.DataFrame, json_data: List[Dict],
                            wilayah_filter: str = None, kk_filter: str = None) -> Tuple[pd.DataFrame, Dict]:
-        """Mencari rumah tangga yang memiliki anggota dengan nama dari JSON"""
-        
-        # Filter JSON data berdasarkan kriteria
-        filtered_json = json_data
-        if wilayah_filter and wilayah_filter != 'Semua':
-            filtered_json = [item for item in filtered_json 
-                           if item.get('wilayah', '').strip() == wilayah_filter]
-        
-        if kk_filter and kk_filter != 'Semua':
-            # Filter berdasarkan KK yang dipilih (exact match dengan field KK)
-            filtered_json = [item for item in filtered_json 
-                           if item.get('KK', '').strip() == kk_filter]
-        
-        # Ambil semua nama dari JSON yang sudah difilter (tetap parse untuk pencarian)
-        search_names = self.get_all_names_from_json(filtered_json)
-        
-        if not search_names:
-            return pd.DataFrame(), {}
-        
-        # Cari nama-nama tersebut di kolom b2r203
-        matched_rows = []
-        match_details = {}
-        
-        with st.spinner(f"Mencari {len(search_names)} nama dalam data CSV..."):
-            for name in search_names:
-                # Cari nama di kolom b2r203 (case insensitive)
-                mask = csv_data['b2r203'].astype(str).str.contains(name, case=False, na=False)
-                matching_rows = csv_data[mask]
-                
-                if not matching_rows.empty:
-                    matched_rows.append(matching_rows)
-                    match_details[name] = len(matching_rows)
-        
-        if not matched_rows:
-            return pd.DataFrame(), match_details
-        
-        # Gabungkan semua baris yang cocok
-        all_matched = pd.concat(matched_rows, ignore_index=True)
-        
-        # Ambil semua id_ruta yang unik dari hasil pencarian
-        unique_ruta_ids = all_matched['id_ruta'].unique()
-        
-        # Ambil semua anggota rumah tangga untuk setiap id_ruta yang cocok
-        complete_households = csv_data[csv_data['id_ruta'].isin(unique_ruta_ids)]
-        
-        return complete_households, match_details
+        """Mencari rumah tangga yang memiliki anggota dengan nama dari JSON atau filter wilayah dari CSV"""
+
+        # Jika ada JSON data, gunakan logic lama
+        if json_data:
+            # Filter JSON data berdasarkan kriteria
+            filtered_json = json_data
+            if wilayah_filter and wilayah_filter != 'Semua':
+                filtered_json = [item for item in filtered_json
+                               if item.get('wilayah', '').strip() == wilayah_filter]
+
+            if kk_filter and kk_filter != 'Semua':
+                # Filter berdasarkan KK yang dipilih (exact match dengan field KK)
+                filtered_json = [item for item in filtered_json
+                               if item.get('KK', '').strip() == kk_filter]
+
+            # Ambil semua nama dari JSON yang sudah difilter (tetap parse untuk pencarian)
+            search_names = self.get_all_names_from_json(filtered_json)
+
+            if not search_names:
+                return pd.DataFrame(), {}
+
+            # Cari nama-nama tersebut di kolom b2r203
+            matched_rows = []
+            match_details = {}
+
+            with st.spinner(f"Mencari {len(search_names)} nama dalam data CSV..."):
+                for name in search_names:
+                    # Cari nama di kolom b2r203 (case insensitive)
+                    mask = csv_data['b2r203'].astype(str).str.contains(name, case=False, na=False)
+                    matching_rows = csv_data[mask]
+
+                    if not matching_rows.empty:
+                        matched_rows.append(matching_rows)
+                        match_details[name] = len(matching_rows)
+
+            if not matched_rows:
+                return pd.DataFrame(), match_details
+
+            # Gabungkan semua baris yang cocok
+            all_matched = pd.concat(matched_rows, ignore_index=True)
+
+            # Ambil semua id_ruta yang unik dari hasil pencarian
+            unique_ruta_ids = all_matched['id_ruta'].unique()
+
+            # Ambil semua anggota rumah tangga untuk setiap id_ruta yang cocok
+            complete_households = csv_data[csv_data['id_ruta'].isin(unique_ruta_ids)]
+
+            return complete_households, match_details
+
+        # Jika tidak ada JSON, filter berdasarkan wilayah dan/atau KK dari CSV
+        else:
+            filtered_csv = csv_data.copy()
+
+            if wilayah_filter and wilayah_filter != 'Semua':
+                # Parse wilayah filter (format: "nama_kec / nama_desa")
+                parts = wilayah_filter.split(' / ')
+                if len(parts) == 2:
+                    kec_filter = parts[0].strip()
+                    desa_filter = parts[1].strip()
+                    filtered_csv = filtered_csv[
+                        (filtered_csv['nama_kec'].astype(str).str.strip() == kec_filter) &
+                        (filtered_csv['nama_desa'].astype(str).str.strip() == desa_filter)
+                    ]
+
+            if kk_filter and kk_filter != 'Semua':
+                # Filter berdasarkan nama KK (hubungan == 1 dan b2r203 == kk_filter)
+                # Ambil id_ruta dari KK yang dipilih
+                kk_ruta_ids = filtered_csv[
+                    (filtered_csv['hubungan'] == 1) &
+                    (filtered_csv['b2r203'].astype(str).str.strip() == kk_filter)
+                ]['id_ruta'].unique()
+
+                # Ambil semua anggota rumah tangga dari id_ruta tersebut
+                filtered_csv = filtered_csv[filtered_csv['id_ruta'].isin(kk_ruta_ids)]
+
+            return filtered_csv, {}
     
     def get_household_summary(self, data: pd.DataFrame) -> Dict:
         """Membuat ringkasan data rumah tangga"""
@@ -270,32 +332,59 @@ def main():
     st.title("🏠 Pencarian Data Rumah Tangga")
     st.markdown("Aplikasi untuk mencari rumah tangga")
     st.markdown("---")
-    
+
     app = RumahTanggaSearchApp()
-    
+
     # Initialize session state for main filters if not exists
     if 'wilayah_filter' not in st.session_state:
         st.session_state.wilayah_filter = 'Semua'
     if 'kk_filter' not in st.session_state:
         st.session_state.kk_filter = 'Semua'
-    
-    # Load data
-    with st.spinner("Memuat data..."):
-        json_data = app.load_json_data()
+    if 'json_data' not in st.session_state:
+        st.session_state.json_data = []
+
+    # File uploader untuk JSON
+    st.subheader("📁 Upload File JSON (Opsional)")
+    uploaded_file = st.file_uploader(
+        "Upload file JSON yang berisi data KK dan wilayah untuk filtering",
+        type=['json'],
+        help="File JSON opsional. Jika tidak diupload, filter wilayah akan menggunakan data dari CSV."
+    )
+
+    # Process uploaded JSON file
+    if uploaded_file is not None:
+        json_data = app.load_json_from_upload(uploaded_file)
+        st.session_state.json_data = json_data
+        if json_data:
+            st.success(f"✅ File JSON berhasil dimuat: {len(json_data)} entri")
+    else:
+        json_data = st.session_state.json_data
+        if not json_data:
+            st.info("ℹ️ Tidak ada file JSON yang diupload. Filter wilayah akan menggunakan format: Kecamatan / Desa dari data CSV.")
+
+    st.markdown("---")
+
+    # Load CSV data
+    with st.spinner("Memuat data CSV..."):
         csv_data = app.load_csv_data()
-    
-    if not json_data or csv_data.empty:
-        st.toast("❌ Gagal memuat data. Pastikan file data.json dan data.csv tersedia.")
+
+    if csv_data.empty:
+        st.error("❌ Gagal memuat data CSV. Pastikan file data*.csv tersedia.")
         return
-    
-    st.toast(f"✅ Data berhasil dimuat: {len(json_data)} entri JSON, {len(csv_data)} baris CSV")
+
+    st.success(f"✅ Data CSV berhasil dimuat: {len(csv_data)} baris")
     
     # Sidebar untuk filter
     col1, col2, col3 = st.columns(3, vertical_alignment="bottom")
 
     # Filter berdasarkan wilayah (dropdown) - dengan session state
     with col1:
-        unique_wilayah = app.get_unique_wilayah(json_data)
+        # Tentukan sumber wilayah berdasarkan ada tidaknya JSON
+        if json_data:
+            unique_wilayah = app.get_unique_wilayah(json_data)
+        else:
+            unique_wilayah = app.get_unique_wilayah_from_csv(csv_data)
+
         wilayah_options = ['Semua'] + unique_wilayah
         wilayah_filter = st.selectbox(
             "Filter Wilayah:",
@@ -305,12 +394,19 @@ def main():
         )
         st.session_state.wilayah_filter = wilayah_filter
 
-    # Filter berdasarkan KK (dropdown) - bertingkat berdasarkan wilayah
+    # Filter berdasarkan KK (dropdown) - dari JSON atau CSV
     with col2:
-        # Ambil daftar KK unik dari JSON sesuai wilayah terpilih
-        filtered_kk_names = app.get_unique_kk_names_by_wilayah(
-            json_data, st.session_state.wilayah_filter
-        )
+        if json_data:
+            # Ambil daftar KK unik dari JSON sesuai wilayah terpilih
+            filtered_kk_names = app.get_unique_kk_names_by_wilayah(
+                json_data, st.session_state.wilayah_filter
+            )
+        else:
+            # Ambil daftar KK unik dari CSV sesuai wilayah terpilih
+            filtered_kk_names = app.get_unique_kk_from_csv_by_wilayah(
+                csv_data, st.session_state.wilayah_filter
+            )
+
         kk_options = ['Semua'] + filtered_kk_names
         # Reset kk_filter jika tidak ada di opsi baru
         if st.session_state.kk_filter not in kk_options:
@@ -324,14 +420,15 @@ def main():
         st.session_state.kk_filter = kk_filter
 
     with col3:
-        if st.button("🔍 Cari Data Rumah Tangga", type="primary"):
+        search_label = "🔍 Cari Data Rumah Tangga" if json_data else "🔍 Filter Data"
+        if st.button(search_label, type="primary"):
             try:
                 # Reset result filters when new search is performed
                 st.session_state.result_kec_filter = 'Semua'
                 st.session_state.result_desa_filter = 'Semua'
-                
+
                 results, match_details = app.search_rumah_tangga(
-                    csv_data, json_data, 
+                    csv_data, json_data,
                     wilayah_filter if wilayah_filter != 'Semua' else None,
                     kk_filter if kk_filter != 'Semua' else None
                 )
