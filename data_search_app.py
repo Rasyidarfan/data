@@ -3,18 +3,24 @@ import pandas as pd
 import json
 import os
 import re
+import sqlite3
 from typing import Dict, List, Any, Set, Tuple
 
 # Konfigurasi halaman
 st.set_page_config(
-    page_title="Pencarian Data Rumah Tangga",
+    page_title="Aplikasi Data Rumah Tangga",
     page_icon="🏠",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+# Import comparison page
+from data_comparison_page import show_comparison_page
 
 class RumahTanggaSearchApp:
     def __init__(self):
         self.data_dir = r""
+        self.db_name = "rumah_tangga.db"
     
     def load_json_from_upload(self, uploaded_file) -> List[Dict]:
         """Memuat data dari uploaded JSON file"""
@@ -27,41 +33,42 @@ class RumahTanggaSearchApp:
             st.error(f"Error membaca file JSON: {str(e)}")
             return []
     
-    @st.cache_data
-    def load_csv_data(_self) -> pd.DataFrame:
-        """Memuat dan menggabungkan semua file data*.csv"""
+    @st.cache_resource
+    def get_db_connection(_self):
+        """Membuat koneksi ke SQLite database"""
+        if not os.path.exists(_self.db_name):
+            st.error(f"❌ Database tidak ditemukan: {_self.db_name}")
+            st.info("💡 Jalankan script 'python csv_to_sqlite.py' terlebih dahulu untuk membuat database")
+            return None
+
+        conn = sqlite3.connect(_self.db_name, check_same_thread=False)
+        # Enable case-insensitive LIKE
+        conn.create_function("LOWER", 1, lambda x: x.lower() if x else x)
+        return conn
+
+    def check_database_status(self) -> bool:
+        """Check apakah database tersedia dan tampilkan statistik"""
+        if not os.path.exists(self.db_name):
+            return False
+
         try:
-            import glob
-            # Mencari semua file data*.csv
-            csv_pattern = os.path.join(_self.data_dir, "data*.csv")
-            csv_files = glob.glob(csv_pattern)
-            
-            if not csv_files:
-                st.error("Tidak ada file data*.csv ditemukan")
-                return pd.DataFrame()
-            
-            # Memuat dan menggabungkan semua file CSV
-            dataframes = []
-            for csv_file in csv_files:
-                try:
-                    df = pd.read_csv(csv_file)
-                    dataframes.append(df)
-                except Exception as e:
-                    st.toast(f"⚠️ Error memuat {os.path.basename(csv_file)}: {str(e)}")
-            
-            if not dataframes:
-                st.error("Tidak ada file CSV yang berhasil dimuat")
-                return pd.DataFrame()
-            
-            # Gabungkan semua dataframes
-            combined_df = pd.concat(dataframes, ignore_index=True)
-            st.write(f"📊 Total gabungan: {len(combined_df)} baris dari {len(csv_files)} file")
-            
-            return combined_df
-            
+            conn = sqlite3.connect(self.db_name)
+            cursor = conn.cursor()
+
+            cursor.execute('SELECT COUNT(*) FROM rumah_tangga')
+            total_rows = cursor.fetchone()[0]
+
+            cursor.execute('SELECT COUNT(DISTINCT id_ruta) FROM rumah_tangga')
+            total_ruta = cursor.fetchone()[0]
+
+            conn.close()
+
+            st.success(f"✅ Database terkoneksi: {total_rows:,} baris data | {total_ruta:,} rumah tangga")
+            return True
+
         except Exception as e:
-            st.error(f"Error membaca file CSV: {str(e)}")
-            return pd.DataFrame()
+            st.error(f"❌ Error membaca database: {str(e)}")
+            return False
     
     def extract_names_from_kk(self, kk_field: str) -> List[str]:
         """Extract nama-nama dari field KK yang bisa berisi 1 atau 2 nama dipisahkan '/'"""
@@ -93,16 +100,21 @@ class RumahTanggaSearchApp:
                 wilayah_set.add(wilayah)
         return sorted(list(wilayah_set))
 
-    def get_unique_wilayah_from_csv(self, csv_data: pd.DataFrame) -> List[str]:
-        """Mengambil daftar wilayah unik dari CSV dengan format 'nama_kec / nama_desa' (sorted)"""
-        wilayah_set = set()
-        for _, row in csv_data.iterrows():
-            kec = str(row.get('nama_kec', '')).strip()
-            desa = str(row.get('nama_desa', '')).strip()
-            if kec and desa:
-                wilayah = f"{kec} / {desa}"
-                wilayah_set.add(wilayah)
-        return sorted(list(wilayah_set))
+    def get_unique_wilayah_from_db(self, conn) -> List[str]:
+        """Mengambil daftar wilayah unik dari database dengan format 'nama_kec / nama_desa' (sorted)"""
+        if conn is None:
+            return []
+
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT nama_kec, nama_desa
+            FROM rumah_tangga
+            WHERE nama_kec IS NOT NULL AND nama_desa IS NOT NULL
+            ORDER BY nama_kec, nama_desa
+        """)
+
+        wilayah_list = [f"{row[0]} / {row[1]}" for row in cursor.fetchall()]
+        return wilayah_list
     
     def get_unique_kk_names(self, json_data: List[Dict]) -> List[str]:
         """Mengambil daftar KK unik dari JSON sesuai urutan asli (tidak diurutkan, tidak di-parse)"""
@@ -129,9 +141,12 @@ class RumahTanggaSearchApp:
                     seen.add(kk)
         return kk_list
 
-    def get_unique_kk_from_csv_by_wilayah(self, csv_data: pd.DataFrame, wilayah: str) -> List[str]:
-        """Mengambil daftar nama KK unik dari CSV untuk wilayah tertentu (hubungan == 1)"""
-        filtered_csv = csv_data[csv_data['hubungan'] == 1].copy()
+    def get_unique_kk_from_db_by_wilayah(self, conn, wilayah: str) -> List[str]:
+        """Mengambil daftar nama KK unik dari database untuk wilayah tertentu (hubungan == 1)"""
+        if conn is None:
+            return []
+
+        cursor = conn.cursor()
 
         if wilayah and wilayah != 'Semua':
             # Parse wilayah filter (format: "nama_kec / nama_desa")
@@ -139,22 +154,47 @@ class RumahTanggaSearchApp:
             if len(parts) == 2:
                 kec_filter = parts[0].strip()
                 desa_filter = parts[1].strip()
-                filtered_csv = filtered_csv[
-                    (filtered_csv['nama_kec'].astype(str).str.strip() == kec_filter) &
-                    (filtered_csv['nama_desa'].astype(str).str.strip() == desa_filter)
-                ]
 
-        # Ambil nama KK unik dari kolom b2r203
-        kk_names = filtered_csv['b2r203'].astype(str).str.strip().unique().tolist()
-        # Hapus nilai kosong atau 'nan'
-        kk_names = [name for name in kk_names if name and name.lower() != 'nan']
-        return sorted(kk_names)
+                cursor.execute("""
+                    SELECT DISTINCT b2r203
+                    FROM rumah_tangga
+                    WHERE hubungan = 1
+                      AND nama_kec = ?
+                      AND nama_desa = ?
+                      AND b2r203 IS NOT NULL
+                    ORDER BY b2r203
+                """, (kec_filter, desa_filter))
+            else:
+                cursor.execute("""
+                    SELECT DISTINCT b2r203
+                    FROM rumah_tangga
+                    WHERE hubungan = 1
+                      AND b2r203 IS NOT NULL
+                    ORDER BY b2r203
+                """)
+        else:
+            cursor.execute("""
+                SELECT DISTINCT b2r203
+                FROM rumah_tangga
+                WHERE hubungan = 1
+                  AND b2r203 IS NOT NULL
+                ORDER BY b2r203
+            """)
 
-    def search_rumah_tangga(self, csv_data: pd.DataFrame, json_data: List[Dict],
-                           wilayah_filter: str = None, kk_filter: str = None) -> Tuple[pd.DataFrame, Dict]:
-        """Mencari rumah tangga yang memiliki anggota dengan nama dari JSON atau filter wilayah dari CSV"""
+        kk_names = [row[0] for row in cursor.fetchall()]
+        return kk_names
 
-        # Jika ada JSON data, gunakan logic lama
+    def search_rumah_tangga_db(self, conn, json_data: List[Dict],
+                               wilayah_filter: str = None, kk_filter: str = None) -> Tuple[pd.DataFrame, Dict]:
+        """Mencari rumah tangga menggunakan SQLite database (lebih cepat)"""
+
+        if conn is None:
+            return pd.DataFrame(), {}
+
+        cursor = conn.cursor()
+        match_details = {}
+
+        # Jika ada JSON data, gunakan logic pencarian nama
         if json_data:
             # Filter JSON data berdasarkan kriteria
             filtered_json = json_data
@@ -163,47 +203,51 @@ class RumahTanggaSearchApp:
                                if item.get('wilayah', '').strip() == wilayah_filter]
 
             if kk_filter and kk_filter != 'Semua':
-                # Filter berdasarkan KK yang dipilih (exact match dengan field KK)
                 filtered_json = [item for item in filtered_json
                                if item.get('KK', '').strip() == kk_filter]
 
-            # Ambil semua nama dari JSON yang sudah difilter (tetap parse untuk pencarian)
+            # Ambil semua nama dari JSON yang sudah difilter
             search_names = self.get_all_names_from_json(filtered_json)
 
             if not search_names:
                 return pd.DataFrame(), {}
 
-            # Cari nama-nama tersebut di kolom b2r203
-            matched_rows = []
-            match_details = {}
+            # Cari nama-nama tersebut di database
+            all_ruta_ids = set()
 
-            with st.spinner(f"Mencari {len(search_names)} nama dalam data CSV..."):
+            with st.spinner(f"Mencari {len(search_names)} nama dalam database..."):
                 for name in search_names:
-                    # Cari nama di kolom b2r203 (case insensitive)
-                    mask = csv_data['b2r203'].astype(str).str.contains(name, case=False, na=False)
-                    matching_rows = csv_data[mask]
+                    # Query untuk mencari nama (case insensitive)
+                    cursor.execute("""
+                        SELECT id_ruta, COUNT(*) as count
+                        FROM rumah_tangga
+                        WHERE LOWER(b2r203) LIKE LOWER(?)
+                        GROUP BY id_ruta
+                    """, (f'%{name}%',))
 
-                    if not matching_rows.empty:
-                        matched_rows.append(matching_rows)
-                        match_details[name] = len(matching_rows)
+                    results = cursor.fetchall()
+                    if results:
+                        match_details[name] = sum(row[1] for row in results)
+                        all_ruta_ids.update(row[0] for row in results)
 
-            if not matched_rows:
+            if not all_ruta_ids:
                 return pd.DataFrame(), match_details
 
-            # Gabungkan semua baris yang cocok
-            all_matched = pd.concat(matched_rows, ignore_index=True)
+            # Ambil semua anggota rumah tangga untuk id_ruta yang cocok
+            placeholders = ','.join('?' * len(all_ruta_ids))
+            query = f"""
+                SELECT * FROM rumah_tangga
+                WHERE id_ruta IN ({placeholders})
+                ORDER BY id_ruta
+            """
 
-            # Ambil semua id_ruta yang unik dari hasil pencarian
-            unique_ruta_ids = all_matched['id_ruta'].unique()
+            df = pd.read_sql_query(query, conn, params=list(all_ruta_ids))
+            return df, match_details
 
-            # Ambil semua anggota rumah tangga untuk setiap id_ruta yang cocok
-            complete_households = csv_data[csv_data['id_ruta'].isin(unique_ruta_ids)]
-
-            return complete_households, match_details
-
-        # Jika tidak ada JSON, filter berdasarkan wilayah dan/atau KK dari CSV
+        # Jika tidak ada JSON, filter berdasarkan wilayah dan/atau KK dari database
         else:
-            filtered_csv = csv_data.copy()
+            conditions = []
+            params = []
 
             if wilayah_filter and wilayah_filter != 'Semua':
                 # Parse wilayah filter (format: "nama_kec / nama_desa")
@@ -211,23 +255,40 @@ class RumahTanggaSearchApp:
                 if len(parts) == 2:
                     kec_filter = parts[0].strip()
                     desa_filter = parts[1].strip()
-                    filtered_csv = filtered_csv[
-                        (filtered_csv['nama_kec'].astype(str).str.strip() == kec_filter) &
-                        (filtered_csv['nama_desa'].astype(str).str.strip() == desa_filter)
-                    ]
+                    conditions.append("nama_kec = ?")
+                    conditions.append("nama_desa = ?")
+                    params.extend([kec_filter, desa_filter])
 
             if kk_filter and kk_filter != 'Semua':
-                # Filter berdasarkan nama KK (hubungan == 1 dan b2r203 == kk_filter)
                 # Ambil id_ruta dari KK yang dipilih
-                kk_ruta_ids = filtered_csv[
-                    (filtered_csv['hubungan'] == 1) &
-                    (filtered_csv['b2r203'].astype(str).str.strip() == kk_filter)
-                ]['id_ruta'].unique()
+                kk_query = "SELECT id_ruta FROM rumah_tangga WHERE hubungan = 1 AND b2r203 = ?"
+                kk_params = [kk_filter]
 
-                # Ambil semua anggota rumah tangga dari id_ruta tersebut
-                filtered_csv = filtered_csv[filtered_csv['id_ruta'].isin(kk_ruta_ids)]
+                if conditions:
+                    kk_query += " AND " + " AND ".join(conditions)
+                    kk_params.extend(params)
 
-            return filtered_csv, {}
+                cursor.execute(kk_query, kk_params)
+                ruta_ids = [row[0] for row in cursor.fetchall()]
+
+                if not ruta_ids:
+                    return pd.DataFrame(), {}
+
+                # Ambil semua anggota dari rumah tangga tersebut
+                placeholders = ','.join('?' * len(ruta_ids))
+                query = f"SELECT * FROM rumah_tangga WHERE id_ruta IN ({placeholders}) ORDER BY id_ruta"
+                df = pd.read_sql_query(query, conn, params=ruta_ids)
+                return df, {}
+
+            # Jika hanya filter wilayah
+            elif conditions:
+                query = f"SELECT * FROM rumah_tangga WHERE {' AND '.join(conditions)} ORDER BY id_ruta"
+                df = pd.read_sql_query(query, conn, params=params)
+                return df, {}
+
+            # Jika tidak ada filter sama sekali
+            else:
+                return pd.DataFrame(), {}
     
     def get_household_summary(self, data: pd.DataFrame) -> Dict:
         """Membuat ringkasan data rumah tangga"""
@@ -329,6 +390,28 @@ class RumahTanggaSearchApp:
                 st.write(f"- Unique id_ruta: {results['id_ruta'].nunique()} values")
 
 def main():
+    # Sidebar navigation
+    st.sidebar.title("📋 Menu Navigasi")
+    page = st.sidebar.radio(
+        "Pilih Halaman:",
+        ["🔍 Pencarian Data", "⚖️ Komparasi Data"],
+        index=0
+    )
+
+    st.sidebar.markdown("---")
+    st.sidebar.info(
+        "**🔍 Pencarian Data**\n"
+        "Mencari dan menampilkan data rumah tangga dari database.\n\n"
+        "**⚖️ Komparasi Data**\n"
+        "Membandingkan data dari CSV upload dengan database SQLite."
+    )
+
+    # Route to selected page
+    if page == "⚖️ Komparasi Data":
+        show_comparison_page()
+        return
+
+    # Otherwise show search page (default)
     st.title("🏠 Pencarian Data Rumah Tangga")
     st.markdown("Aplikasi untuk mencari rumah tangga")
     st.markdown("---")
@@ -364,16 +447,17 @@ def main():
 
     st.markdown("---")
 
-    # Load CSV data
-    with st.spinner("Memuat data CSV..."):
-        csv_data = app.load_csv_data()
-
-    if csv_data.empty:
-        st.error("❌ Gagal memuat data CSV. Pastikan file data*.csv tersedia.")
+    # Check database status
+    if not app.check_database_status():
+        st.warning("⚠️ Database belum tersedia. Jalankan converter terlebih dahulu:")
+        st.code("python csv_to_sqlite.py", language="bash")
         return
 
-    st.success(f"✅ Data CSV berhasil dimuat: {len(csv_data)} baris")
-    
+    # Get database connection
+    conn = app.get_db_connection()
+    if conn is None:
+        return
+
     # Sidebar untuk filter
     col1, col2, col3 = st.columns(3, vertical_alignment="bottom")
 
@@ -383,7 +467,7 @@ def main():
         if json_data:
             unique_wilayah = app.get_unique_wilayah(json_data)
         else:
-            unique_wilayah = app.get_unique_wilayah_from_csv(csv_data)
+            unique_wilayah = app.get_unique_wilayah_from_db(conn)
 
         wilayah_options = ['Semua'] + unique_wilayah
         wilayah_filter = st.selectbox(
@@ -394,7 +478,7 @@ def main():
         )
         st.session_state.wilayah_filter = wilayah_filter
 
-    # Filter berdasarkan KK (dropdown) - dari JSON atau CSV
+    # Filter berdasarkan KK (dropdown) - dari JSON atau database
     with col2:
         if json_data:
             # Ambil daftar KK unik dari JSON sesuai wilayah terpilih
@@ -402,9 +486,9 @@ def main():
                 json_data, st.session_state.wilayah_filter
             )
         else:
-            # Ambil daftar KK unik dari CSV sesuai wilayah terpilih
-            filtered_kk_names = app.get_unique_kk_from_csv_by_wilayah(
-                csv_data, st.session_state.wilayah_filter
+            # Ambil daftar KK unik dari database sesuai wilayah terpilih
+            filtered_kk_names = app.get_unique_kk_from_db_by_wilayah(
+                conn, st.session_state.wilayah_filter
             )
 
         kk_options = ['Semua'] + filtered_kk_names
@@ -427,8 +511,8 @@ def main():
                 st.session_state.result_kec_filter = 'Semua'
                 st.session_state.result_desa_filter = 'Semua'
 
-                results, match_details = app.search_rumah_tangga(
-                    csv_data, json_data,
+                results, match_details = app.search_rumah_tangga_db(
+                    conn, json_data,
                     wilayah_filter if wilayah_filter != 'Semua' else None,
                     kk_filter if kk_filter != 'Semua' else None
                 )
